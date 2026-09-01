@@ -22,9 +22,12 @@
 #include "cmt2300a_hal.h"
 #include "cmt2300a_params_captured.h"
 
+static bool radio_initialized;
+
 int RF_Init(void)
 {
     uint8_t tmp;
+    radio_initialized = false;
     
     CMT2300A_InitGpio();
 	CMT2300A_Init();
@@ -48,32 +51,39 @@ int RF_Init(void)
     }
     else
 	{
+        radio_initialized = true;
         return 0;
     }
 }
 
-int StartTx() {
+RadioStatus RadioStandby(void) {
+    if (!radio_initialized)
+        return RADIO_OK;
+    return CMT2300A_GoStby() ? RADIO_OK : RADIO_STANDBY_FAILED;
+}
+
+RadioStatus StartTx() {
      if (RF_Init()!=0) {
-        return 1;
+        return RADIO_INIT_FAILED;
 	}
     CMT2300A_WriteReg(CMT2300A_CUS_SYS2,0); //???? 
     CMT2300A_ConfigGpio(CMT2300A_GPIO1_SEL_DOUT | CMT2300A_GPIO3_SEL_DIN | CMT2300A_GPIO2_SEL_INT2);
 	CMT2300A_EnableTxDin(true);    
 	CMT2300A_ConfigTxDin(CMT2300A_TX_DIN_SEL_GPIO1);
 	CMT2300A_EnableTxDinInvert(false); 
-	CMT2300A_GoSleep();
-	CMT2300A_GoStby();
+	if (!CMT2300A_GoSleep()) return RADIO_SLEEP_FAILED;
+	if (!CMT2300A_GoStby()) return RADIO_STANDBY_FAILED;
 	if (CMT2300A_GoTx()) {
-        return 0;
+        return RADIO_OK;
     } else {
-        return 2;
+        return RADIO_TX_FAILED;
     }
 }
  
 
-int StartRx() {
+RadioStatus StartRx() {
     if (RF_Init()!=0) {
-        return 1;
+        return RADIO_INIT_FAILED;
 	}
 
     CMT2300A_ConfigGpio (CMT2300A_GPIO1_SEL_INT1 | CMT2300A_GPIO2_SEL_INT2 | CMT2300A_GPIO3_SEL_DOUT);
@@ -86,15 +96,15 @@ int StartRx() {
 
 	CMT2300A_WriteReg(CMT2300A_CUS_PKT29, 0x20); 
 
-	CMT2300A_GoSleep();
-	CMT2300A_GoStby();
+	if (!CMT2300A_GoSleep()) return RADIO_SLEEP_FAILED;
+	if (!CMT2300A_GoStby()) return RADIO_STANDBY_FAILED;
 	CMT2300A_ConfigGpio (CMT2300A_GPIO1_SEL_DCLK | CMT2300A_GPIO2_SEL_DOUT | CMT2300A_GPIO3_SEL_INT2);
 	CMT2300A_ConfigInterrupt(CMT2300A_INT_SEL_SYNC_OK | CMT2300A_INT_SEL_SL_TMO, CMT2300A_INT_SEL_PKT_OK);
     CMT2300A_EnableFifoMerge(true);
 	CMT2300A_ClearInterruptFlags();
 	CMT2300A_ClearRxFifo();
 	
-    CMT2300A_GoRx();
+    if (!CMT2300A_GoRx()) return RADIO_RX_FAILED;
 
 	//CMT2300_IsExist()
 	int rssi=CMT2300A_GetRssiDBm();
@@ -102,5 +112,5 @@ int StartRx() {
 	//stream->println(rssi);
 
 	CMT2300A_ClearInterruptFlags();
-    return 0;
+    return RADIO_OK;
 }

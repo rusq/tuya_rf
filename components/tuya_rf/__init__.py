@@ -26,6 +26,9 @@ CONF_MOSI_PIN = "mosi_pin"
 CONF_CSB_PIN = "csb_pin"
 CONF_FCSB_PIN = "fcsb_pin"
 CONF_RECEIVER_ID = "receiver_id"
+MIN_BUFFER_SIZE = 10 * 4
+MAX_BUFFER_SIZE = 16 * 1024
+DEFAULT_RECEIVER_DISABLED = True
 
 from esphome.core import CORE, TimePeriod
 
@@ -109,51 +112,68 @@ def validate_tolerance(value):
         }
     )
 
+
+def validate_buffer_size(value):
+    value = cv.validate_bytes(value)
+    if value < MIN_BUFFER_SIZE:
+        raise cv.Invalid(f"buffer_size must be at least {MIN_BUFFER_SIZE} bytes")
+    entries = value // 4
+    if entries % 2:
+        entries += 1
+    if value > MAX_BUFFER_SIZE or entries * 4 > MAX_BUFFER_SIZE:
+        raise cv.Invalid(f"buffer_size must be no greater than {MAX_BUFFER_SIZE} bytes")
+    return value
+
+
+def validate_pulses(config):
+    start_pulse_min = config[CONF_START_PULSE_MIN]
+    start_pulse_max = config[CONF_START_PULSE_MAX]
+    end_pulse = config[CONF_END_PULSE]
+    if start_pulse_max <= start_pulse_min:
+        raise cv.Invalid("start_pulse_max must be greater than start_pulse_min")
+    if end_pulse <= start_pulse_max:
+        raise cv.Invalid("end_pulse must be greater than start_pulse_max")
+    return config
+
 #MULTI_CONF will be possible once the cmt2300a code is refactored
 #to use different spi pins for each instance
 #MULTI_CONF = True
-CONFIG_SCHEMA = remote_base.validate_triggers(
-    cv.Schema(
-        {
-            cv.GenerateID(): cv.declare_id(TuyaRfComponent),
-            cv.Optional(CONF_SCLK_PIN, default='P14'): cv.All(pins.internal_gpio_output_pin_schema),
-            cv.Optional(CONF_MOSI_PIN, default='P16'): cv.All(pins.internal_gpio_output_pin_schema),
-            cv.Optional(CONF_CSB_PIN, default='P6'): cv.All(pins.internal_gpio_output_pin_schema),
-            cv.Optional(CONF_FCSB_PIN, default='P26'): cv.All(pins.internal_gpio_output_pin_schema),
-            cv.Optional(CONF_TX_PIN, default='P20'): cv.All(pins.internal_gpio_output_pin_schema),
-            cv.Optional(CONF_RX_PIN, default='P22'): cv.All(pins.internal_gpio_input_pin_schema),
-            cv.Optional(CONF_RECEIVER_DISABLED, default=False): cv.boolean,
-            cv.Optional(CONF_DUMP, default=[]): remote_base.validate_dumpers,
-            cv.Optional(CONF_TOLERANCE, default="25%"): validate_tolerance,
-            cv.Optional(CONF_BUFFER_SIZE, default="1000b"): cv.validate_bytes,
-            cv.Optional(CONF_FILTER, default="50us"): cv.All(
-                cv.positive_time_period_microseconds,
-                cv.Range(max=TimePeriod(microseconds=4294967295)),
-            ),
-            cv.Optional(CONF_START_PULSE_MIN, default="6000us"): cv.All(
-                cv.positive_time_period_microseconds,
-                cv.Range(max=TimePeriod(microseconds=4294967295)),
-            ),
-            cv.Optional(CONF_START_PULSE_MAX, default="10000us"): cv.All(
-                cv.positive_time_period_microseconds,
-                cv.Range(max=TimePeriod(microseconds=4294967295)),
-            ),
-            cv.Optional(CONF_END_PULSE, default="50ms"): cv.All(
-                cv.positive_time_period_microseconds,
-                cv.Range(max=TimePeriod(microseconds=4294967295)),
-            ),
-        }
-    ).extend(cv.COMPONENT_SCHEMA)
+CONFIG_SCHEMA = cv.All(
+    remote_base.validate_triggers(
+        cv.Schema(
+            {
+                cv.GenerateID(): cv.declare_id(TuyaRfComponent),
+                cv.Optional(CONF_SCLK_PIN, default='P14'): cv.All(pins.internal_gpio_output_pin_schema),
+                cv.Optional(CONF_MOSI_PIN, default='P16'): cv.All(pins.internal_gpio_output_pin_schema),
+                cv.Optional(CONF_CSB_PIN, default='P6'): cv.All(pins.internal_gpio_output_pin_schema),
+                cv.Optional(CONF_FCSB_PIN, default='P26'): cv.All(pins.internal_gpio_output_pin_schema),
+                cv.Optional(CONF_TX_PIN, default='P20'): cv.All(pins.internal_gpio_output_pin_schema),
+                cv.Optional(CONF_RX_PIN, default='P22'): cv.All(pins.internal_gpio_input_pin_schema),
+                cv.Optional(CONF_RECEIVER_DISABLED, default=DEFAULT_RECEIVER_DISABLED): cv.boolean,
+                cv.Optional(CONF_DUMP, default=[]): remote_base.validate_dumpers,
+                cv.Optional(CONF_TOLERANCE, default="25%"): validate_tolerance,
+                cv.Optional(CONF_BUFFER_SIZE, default="1000b"): validate_buffer_size,
+                cv.Optional(CONF_FILTER, default="50us"): cv.All(
+                    cv.positive_time_period_microseconds,
+                    cv.Range(max=TimePeriod(microseconds=4294967295)),
+                ),
+                cv.Optional(CONF_START_PULSE_MIN, default="6000us"): cv.All(
+                    cv.positive_time_period_microseconds,
+                    cv.Range(max=TimePeriod(microseconds=4294967295)),
+                ),
+                cv.Optional(CONF_START_PULSE_MAX, default="10000us"): cv.All(
+                    cv.positive_time_period_microseconds,
+                    cv.Range(max=TimePeriod(microseconds=4294967295)),
+                ),
+                cv.Optional(CONF_END_PULSE, default="50ms"): cv.All(
+                    cv.positive_time_period_microseconds,
+                    cv.Range(max=TimePeriod(microseconds=4294967295)),
+                ),
+            }
+        ).extend(cv.COMPONENT_SCHEMA)
+    ),
+    validate_pulses,
 )
-
-def validate_pulses(config):
-    start_pulse_min=config[CONF_START_PULSE_MIN]
-    start_pulse_max=config[CONF_START_PULSE_MAX]
-    end_pulse=config[CONF_END_PULSE]
-    if start_pulse_max < start_pulse_min:
-        raise cv.Invalid("start_pulse_max must be greater than start_pulse_min")
-    if end_pulse < start_pulse_max:
-        raise cv.Invalid("end_pulse must be greater than start_pulse_max")
 
 async def to_code(config):
     sclk_pin = await cg.gpio_pin_expression(config[CONF_SCLK_PIN])
@@ -184,4 +204,3 @@ async def to_code(config):
     cg.add(var.set_start_pulse_min_us(config[CONF_START_PULSE_MIN]))
     cg.add(var.set_start_pulse_max_us(config[CONF_START_PULSE_MAX]))
     cg.add(var.set_end_pulse_us(config[CONF_END_PULSE]))
-    validate_pulses(config)

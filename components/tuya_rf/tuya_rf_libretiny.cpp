@@ -31,8 +31,8 @@ void IRAM_ATTR HOT RemoteReceiverComponentStore::gpio_intr(RemoteReceiverCompone
 
 void TuyaRfComponent::turn_on_receiver() {
   if (this->receiver_disabled_) {
-    this->receiver_disabled_=false;
-    this->set_receiver(true);
+    if (this->set_receiver(true))
+      this->receiver_disabled_ = false;
    } else {
      ESP_LOGD(TAG,"receiver already active");
    }
@@ -40,45 +40,66 @@ void TuyaRfComponent::turn_on_receiver() {
 
 void TuyaRfComponent::turn_off_receiver() {
   if (!this->receiver_disabled_) {
-    this->receiver_disabled_=true;
+    this->receiver_disabled_ = true;
     this->set_receiver(false);
    } else {
      ESP_LOGD(TAG,"receiver already disabled");
    }
 }
 
-void TuyaRfComponent::set_receiver(bool on) {
+void TuyaRfComponent::reset_capture_state_() {
+  auto &s = this->store_;
+  const uint32_t index = !this->RemoteReceiverBase::pin_->digital_read() ? 1 : 0;
+  s.buffer_write_at = index;
+  s.buffer_read_at = index;
+  s.buffer[index] = micros();
+  this->old_write_at_ = index;
+  this->receive_started_ = false;
+  s.overflow = false;
+}
+
+void TuyaRfComponent::pause_receiver_() {
+  if (!this->receiver_active_)
+    return;
+  this->RemoteReceiverBase::pin_->detach_interrupt();
+  this->high_freq_.stop();
+  this->reset_capture_state_();
+  this->receiver_active_ = false;
+}
+
+bool TuyaRfComponent::resume_receiver_() {
+  auto &s = this->store_;
+  if (s.buffer == nullptr) {
+    s.buffer = new uint32_t[s.buffer_size];
+    if (s.buffer == nullptr)
+      return false;
+    memset((void *) s.buffer, 0, s.buffer_size * sizeof(uint32_t));
+  }
+  if (StartRx() != RADIO_OK) {
+    ESP_LOGE(TAG, "failed to start radio receiver");
+    RadioStandby();
+    return false;
+  }
+  this->reset_capture_state_();
+  this->RemoteReceiverBase::pin_->attach_interrupt(RemoteReceiverComponentStore::gpio_intr, &this->store_, gpio::INTERRUPT_ANY_EDGE);
+  this->high_freq_.start();
+  this->receiver_active_ = true;
+  return true;
+}
+
+bool TuyaRfComponent::set_receiver(bool on) {
   if (on) {
     ESP_LOGD(TAG, "starting receiver");
-    auto &s = this->store_;
-    if (s.buffer==NULL) {
-      ESP_LOGD(TAG,"first time starting the receiver, allocating buffer");
-      s.buffer = new uint32_t[s.buffer_size];
-      void *buf = (void *) s.buffer;
-      memset(buf, 0, s.buffer_size * sizeof(uint32_t));
-    }
-    // First index is a space (signal is inverted)
-    if (!this->RemoteReceiverBase::pin_->digital_read()) {
-      s.buffer_write_at = s.buffer_read_at = 1;
-    } else {
-      s.buffer_write_at = s.buffer_read_at = 0;
-    }
-    this->RemoteReceiverBase::pin_->attach_interrupt(RemoteReceiverComponentStore::gpio_intr, &this->store_, gpio::INTERRUPT_ANY_EDGE);
-    this->high_freq_.start();
-    if (!this->transmitting_) {
-      StartRx();
-    }
+    if (this->receiver_active_)
+      return true;
+    return this->resume_receiver_();
   } else {
     ESP_LOGD(TAG, "stopping receiver");
-    if (!this->transmitting_) {
-      if(CMT2300A_GoStby()) {
-        //ESP_LOGD(TAG,"go stby ok");
-      } else {
-        ESP_LOGE(TAG,"go stby error");
-      }
-    }
-    this->RemoteReceiverBase::pin_->detach_interrupt();
-    this->high_freq_.stop();
+    this->pause_receiver_();
+    const bool standby_ok = RadioStandby() == RADIO_OK;
+    if (!standby_ok)
+      ESP_LOGE(TAG, "go stby error");
+    return standby_ok;
   }
 }
 
@@ -90,7 +111,8 @@ void TuyaRfComponent::setup() {
   auto &s = this->store_;
   s.filter_us = this->filter_us_;
   s.pin = this->RemoteReceiverBase::pin_->to_isr();
-  s.buffer_size = this->buffer_size_;
+  // buffer_size_ is configured in bytes; the ring stores uint32_t timestamps.
+  s.buffer_size = this->buffer_size_ / sizeof(uint32_t);
 
   if (s.buffer_size % 2 != 0) {
     // Make sure divisible by two. This way, we know that every 0bxxx0 index is a space and every 0bxxx1 index is a mark
@@ -98,7 +120,11 @@ void TuyaRfComponent::setup() {
   }
   //the buffer will be allocated the first time the receiver is enabled
 
-  this->set_receiver(!this->receiver_disabled_);
+  if (!this->receiver_disabled_ && !this->set_receiver(true)) {
+    ESP_LOGE(TAG, "receiver startup failed");
+    this->receiver_disabled_ = true;
+    this->mark_failed();
+  }
 }
 
 void TuyaRfComponent::dump_config() {
@@ -165,63 +191,49 @@ void IRAM_ATTR TuyaRfComponent::send_internal(uint32_t send_times, uint32_t send
     }
 */
   
-  InterruptLock lock;
-  
+  const bool restore_receiver = this->receiver_active_;
+  this->pause_receiver_();
   this->transmitting_=true;
   this->RemoteTransmitterBase::pin_->digital_write(false);
 
-  int res=StartTx();
-  switch(res) {
-    case 0:
-      //ESP_LOGD(TAG,"StartTx ok");
-      break;
-    case 1:
-      ESP_LOGE(TAG,"Error Rf_Init");
-      this->transmitting_=false;
-      return;
-    case 2:
-      ESP_LOGE(TAG,"Error go tx");
-      this->transmitting_=false;
-      return;
-    default:
-      ESP_LOGE(TAG,"Unknown error %d",res);
-      this->transmitting_=false;
-      return;      
-  }
-  
-  this->RemoteTransmitterBase::pin_->digital_write(false);
+  const RadioStatus tx_status = StartTx();
+  if (tx_status == RADIO_OK) {
+    {
+      InterruptLock lock;
+      this->RemoteTransmitterBase::pin_->digital_write(false);
 
-  this->target_time_ = 0;
-  //there's an extra delay somewhere, maybe the first call to get_data()
-  //I don't think the timing of the leading space is  critical though
-  this->space_(4700-2200);
-  for (uint32_t i = 0; i < send_times; i++) {
-    //InterruptLock lock;
-    for (int32_t item : this->RemoteTransmitterBase::temp_.get_data()) {
-      if (item > 0) {
-        this->space_(item); // positive -> space -> carrier OFF
-      } else {
-        this->mark_(-item); // negative -> mark -> carrier ON
+      this->target_time_ = 0;
+      this->space_(4700-2200);
+      for (uint32_t i = 0; i < send_times; i++) {
+        for (int32_t item : this->RemoteTransmitterBase::temp_.get_data()) {
+          if (item > 0) {
+            this->space_(item);
+          } else {
+            this->mark_(-item);
+          }
+          App.feed_wdt();
+        }
+        if (i + 1 < send_times && send_wait>0)
+          this->space_(send_wait);
       }
-      App.feed_wdt();
+      this->space_(2000);
+      this->await_target_time_();
     }
-    if (i + 1 < send_times && send_wait>0)
-      this->space_(send_wait);
-  }
-  this->space_(2000);
-  this->await_target_time_();
-  
-  this->transmitting_=false;
-  if (this->receiver_disabled_) {
-    if(CMT2300A_GoStby()) {
-      //ESP_LOGD(TAG,"go stby ok");
-    } else {
-      ESP_LOGE(TAG,"go stby error");
-    } 
   } else {
-    //Go back to rx mode
-    StartRx();
-  } 
+    ESP_LOGE(TAG, "radio TX startup failed (%d)", tx_status);
+  }
+  this->transmitting_=false;
+  bool restored = true;
+  if (restore_receiver) {
+    restored = this->resume_receiver_();
+  } else {
+    restored = RadioStandby() == RADIO_OK;
+  }
+  if (!restored) {
+    this->receiver_disabled_ = true;
+    ESP_LOGE(TAG, "failed to restore radio state after transmission");
+    this->mark_failed();
+  }
 }
 
 /*
@@ -239,7 +251,7 @@ The rf input is quite noisy, so some heavy filtering must be done:
     reception, the parameter to detect it is end_pulse_us_.
 */
 void TuyaRfComponent::loop() {
-  if (this->receiver_disabled_) {
+  if (!this->receiver_active_) {
     return;
   }  
   auto &s = this->store_;

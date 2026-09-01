@@ -66,7 +66,10 @@ class TuyaRfComponent : public remote_base::RemoteTransmitterBase,
   void space_(uint32_t usec);
 
   void await_target_time_();
-  void set_receiver(bool on);
+  bool set_receiver(bool on);
+  void reset_capture_state_();
+  void pause_receiver_();
+  bool resume_receiver_();
   uint32_t target_time_;
 #if defined(USE_LIBRETINY)
   RemoteReceiverComponentStore store_;
@@ -78,7 +81,8 @@ class TuyaRfComponent : public remote_base::RemoteTransmitterBase,
   InternalGPIOPin *csb_pin_;
   InternalGPIOPin *fcsb_pin_;
   
-  bool receiver_disabled_{false};
+  bool receiver_disabled_{true};
+  bool receiver_active_{false};
   uint32_t buffer_size_{};
   uint32_t filter_us_{50};
   uint32_t start_pulse_min_us_{6000};
