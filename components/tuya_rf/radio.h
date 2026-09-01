@@ -27,8 +27,18 @@
 extern "C" { 
 #endif
 
-int StartTx(void);
-int StartRx(void);
+typedef enum {
+    RADIO_OK = 0,
+    RADIO_INIT_FAILED,
+    RADIO_SLEEP_FAILED,
+    RADIO_STANDBY_FAILED,
+    RADIO_RX_FAILED,
+    RADIO_TX_FAILED,
+} RadioStatus;
+
+RadioStatus RadioStandby(void);
+RadioStatus StartTx(void);
+RadioStatus StartRx(void);
 
 #ifdef __cplusplus 
 } 

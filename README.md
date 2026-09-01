@@ -42,7 +42,7 @@ You can use the same configuration variables of the [remote_transmitter](https:/
 
 | variable | default | description |
 |--|--|--|
-|receiver_disabled|false|set it to true to disable the receiver|
+|receiver_disabled|true|set it to false to enable the receiver at startup|
 |tx_pin|P20|pin used to transmit data, note that by default it is inverted, so a pulse is 1 and a space is 0 (the signal on my device is reversed: 0 for a pulse, 1 for a space)|
 |rx_pin|P22|pin used to receive the data, note that by default it is inverted just like the tx_pin|
 |start_pulse_min|6ms|the minimun duration of the starting pulse|
@@ -53,6 +53,10 @@ You can use the same configuration variables of the [remote_transmitter](https:/
 |csb_pin|P6|spi chip select pin to read/write registers. Only the number of the pin is used, the remaining parameters of the pin schema are ignored|
 |fcsb_pin|P26|spi chip select pin to read/write the fifo. It is not used|
 
+`buffer_size` must be between 40 bytes and 16 KiB. It is a byte budget for the
+edge ring buffer, which stores one 32-bit timestamp per entry; odd entry counts
+are rounded up to an even number.
+
 ## actions
 
 Since the receiver is mostly useful to learn new buttons, it's better to
@@ -62,4 +66,3 @@ and `tuya_rf.turn_off_receiver` (to turn it off).
 Once the code is fixed to work with multiple instances of tuya_rf (currently
 it only allows one instance) you shuould specify the `receiver_id` in the
 action.
-
